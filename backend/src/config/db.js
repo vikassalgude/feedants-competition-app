@@ -11,16 +11,21 @@ const connectDB = async () => {
     await mongoose.connect(uri, {
       serverSelectionTimeoutMS: 3000,
     });
-    console.log('MongoDB connected successfully via process.env.MONGODB_URI');
+    console.log('✅ MongoDB connected successfully via process.env.MONGODB_URI');
   } catch (error) {
-    console.warn(`Could not connect to external MongoDB (${error.message}). Falling back to MongoMemoryServer for standalone execution...`);
+    console.warn(`\n================================================================`);
+    console.warn(`⚠️ WARNING: MONGODB_URI is missing or unreachable (${error.message}).`);
+    console.warn(`⚠️ Falling back to MongoMemoryServer (In-Memory Database) for standalone execution.`);
+    console.warn(`⚠️ NOTE: DATA WILL NOT PERSIST across server restarts!`);
+    console.warn(`================================================================\n`);
+    
     try {
       mongoMemoryServer = await MongoMemoryServer.create();
       const memUri = mongoMemoryServer.getUri();
       await mongoose.connect(memUri);
-      console.log(`MongoDB connected in-memory at: ${memUri}`);
+      console.log(`✅ MongoDB connected in-memory at: ${memUri}`);
     } catch (memErr) {
-      console.error('Failed to initialize MongoMemoryServer:', memErr);
+      console.error('❌ Failed to initialize MongoMemoryServer:', memErr);
       process.exit(1);
     }
   }

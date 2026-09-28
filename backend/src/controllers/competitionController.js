@@ -25,9 +25,9 @@ const seedSampleData = async () => {
       photoUrl: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&w=400&q=80',
       videoUrl: 'https://www.w3schools.com/html/mov_bbb.mp4'
     },
-    // Timestamps configured for active demo
-    registrationDeadline: new Date(Date.now() + 5 * 86400000), // 5 days from now
-    submissionStartsAt: new Date(Date.now() - 1 * 86400000),   // Started 1 day ago
+    // Timestamps configured for standard lifecycle sequence
+    registrationDeadline: new Date(Date.now() + 5 * 86400000),  // 5 days from now
+    submissionStartsAt: new Date(Date.now() + 6 * 86400000),    // Starts 6 days from now
     submissionEndsAt: new Date(Date.now() + 10 * 86400000),     // Ends in 10 days
     resultDate: new Date(Date.now() + 15 * 86400000),           // Results in 15 days
     rewards: [
@@ -104,7 +104,10 @@ exports.getCompetitionDetails = async (req, res) => {
   try {
     let { id } = req.params;
     const userId = req.headers['x-user-id'] || req.query.userId || 'user_demo_1';
-    const simulatedNow = req.query.simulatedNow ? new Date(req.query.simulatedNow) : new Date();
+    
+    // Server ignores client simulatedNow unless ENABLE_DEMO_CONTROLS === 'true'
+    const isDemoEnabled = process.env.ENABLE_DEMO_CONTROLS === 'true';
+    const simulatedNow = (isDemoEnabled && req.query.simulatedNow) ? new Date(req.query.simulatedNow) : new Date();
 
     let competition;
     if (id === 'default' || !id) {
@@ -178,38 +181,53 @@ exports.registerForCompetition = async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.headers['x-user-id'] || req.body.userId || req.query.userId;
-    const simulatedNow = req.body.simulatedNow ? new Date(req.body.simulatedNow) : new Date();
+    const isDemoEnabled = process.env.ENABLE_DEMO_CONTROLS === 'true';
+    const reqSimTime = req.body.simulatedNow || req.query.simulatedNow;
+    const simulatedNow = (isDemoEnabled && reqSimTime) ? new Date(reqSimTime) : new Date();
 
     if (!userId) {
       return res.status(400).json({ success: false, message: 'User ID is required' });
     }
 
-    let comp = await Competition.findById(id);
+    let comp;
+    if (id === 'default' || !id) {
+      comp = await Competition.findOne({ title: 'Feedants Classical Dance' });
+    } else {
+      comp = await Competition.findById(id);
+    }
+
     if (!comp) {
       return res.status(404).json({ success: false, message: 'Competition not found' });
     }
 
-    // 1. Check if user is already registered
-    const existingRegistration = await Registration.findOne({
-      userId,
-      competitionId: comp._id,
-      status: 'REGISTERED'
-    });
-
-    if (existingRegistration) {
-      return res.status(400).json({
-        success: false,
-        message: 'User is already registered for this competition'
-      });
-    }
-
-    // 2. Validate current phase
+    // 1. Validate current phase
     const currentPhase = derivePhase(comp, simulatedNow);
     if (currentPhase !== PHASES.OPEN_FOR_REGISTRATION) {
       return res.status(400).json({
         success: false,
         message: `Registration is not open. Current phase is ${currentPhase}.`
       });
+    }
+
+    // 2. Insert Registration document FIRST.
+    // MongoDB unique index on { userId: 1, competitionId: 1 } prevents duplicate registration atomically.
+    let registration;
+    try {
+      registration = new Registration({
+        userId,
+        competitionId: comp._id,
+        registeredAt: new Date(),
+        status: 'REGISTERED'
+      });
+      await registration.save();
+    } catch (dbErr) {
+      if (dbErr.code === 11000) {
+        return res.status(400).json({
+          success: false,
+          message: 'User is already registered for this competition'
+        });
+      }
+      throw dbErr;
     }
 
     // 3. ATOMIC SPOT RESERVATION
@@ -225,43 +243,24 @@ exports.registerForCompetition = async (req, res) => {
       { new: true }
     );
 
+    // 4. If spots were full, rollback the registration record and return 409 Conflict
     if (!updatedComp) {
+      await Registration.deleteOne({ _id: registration._id });
       return res.status(409).json({
         success: false,
         message: 'Registration failed: Competition is fully booked or unavailable!'
       });
     }
 
-    // 4. Create Registration document
-    try {
-      const registration = new Registration({
-        userId,
-        competitionId: comp._id,
-        registeredAt: new Date(),
-        status: 'REGISTERED'
-      });
-      await registration.save();
-
-      return res.status(201).json({
-        success: true,
-        message: 'Registration successful!',
-        data: {
-          registration,
-          updatedSpotsBooked: updatedComp.spotsBooked,
-          totalSpots: updatedComp.totalSpots
-        }
-      });
-    } catch (dbErr) {
-      // Rollback atomic spot count if registration document creation fails (e.g., unique index violation)
-      await Competition.findByIdAndUpdate(comp._id, { $inc: { spotsBooked: -1 } });
-      if (dbErr.code === 11000) {
-        return res.status(400).json({
-          success: false,
-          message: 'User is already registered for this competition'
-        });
+    return res.status(201).json({
+      success: true,
+      message: 'Registration successful!',
+      data: {
+        registration,
+        updatedSpotsBooked: updatedComp.spotsBooked,
+        totalSpots: updatedComp.totalSpots
       }
-      throw dbErr;
-    }
+    });
   } catch (err) {
     console.error('Error during registration:', err);
     res.status(500).json({ success: false, message: err.message });
@@ -274,7 +273,8 @@ exports.submitEntry = async (req, res) => {
     const { id } = req.params;
     const userId = req.headers['x-user-id'] || req.body.userId;
     const { fileUrl, notes } = req.body;
-    const simulatedNow = req.body.simulatedNow ? new Date(req.body.simulatedNow) : new Date();
+    const isDemoEnabled = process.env.ENABLE_DEMO_CONTROLS === 'true';
+    const simulatedNow = (isDemoEnabled && req.body.simulatedNow) ? new Date(req.body.simulatedNow) : new Date();
 
     if (!userId) {
       return res.status(400).json({ success: false, message: 'User ID is required' });
@@ -284,7 +284,13 @@ exports.submitEntry = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Submission file URL or content is required' });
     }
 
-    const comp = await Competition.findById(id);
+    let comp;
+    if (id === 'default' || !id) {
+      comp = await Competition.findOne({ title: 'Feedants Classical Dance' });
+    } else {
+      comp = await Competition.findById(id);
+    }
+
     if (!comp) {
       return res.status(404).json({ success: false, message: 'Competition not found' });
     }
@@ -343,6 +349,46 @@ exports.submitEntry = async (req, res) => {
     });
   } catch (err) {
     console.error('Error during submission:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/competitions/:id/set-spots-left
+exports.setSpotsLeft = async (req, res) => {
+  try {
+    if (process.env.ENABLE_DEMO_CONTROLS !== 'true') {
+      return res.status(403).json({ success: false, message: 'Demo controls disabled' });
+    }
+    const { id } = req.params;
+    const spotsRemaining = req.body.spotsRemaining !== undefined ? Number(req.body.spotsRemaining) : 1;
+
+    let comp;
+    if (id === 'default' || !id) {
+      comp = await Competition.findOne({ title: 'Feedants Classical Dance' });
+    } else {
+      comp = await Competition.findById(id);
+    }
+
+    if (!comp) {
+      return res.status(404).json({ success: false, message: 'Competition not found' });
+    }
+
+    comp.spotsBooked = Math.max(0, comp.totalSpots - spotsRemaining);
+    await comp.save();
+
+    // Clear registrations so test users can compete for the remaining spot
+    await Registration.deleteMany({ competitionId: comp._id });
+
+    res.json({
+      success: true,
+      message: `Competition updated to ${spotsRemaining} spot(s) remaining!`,
+      data: {
+        spotsBooked: comp.spotsBooked,
+        totalSpots: comp.totalSpots,
+        spotsRemaining
+      }
+    });
+  } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };

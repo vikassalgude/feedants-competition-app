@@ -11,6 +11,9 @@ router.get('/:id', competitionController.getCompetitionDetails);
 // POST register for competition (Atomic spot reservation)
 router.post('/:id/register', competitionController.registerForCompetition);
 
+// POST set spots remaining (Demo helper)
+router.post('/:id/set-spots-left', competitionController.setSpotsLeft);
+
 // POST submit entry
 router.post('/:id/submit', competitionController.submitEntry);
 
